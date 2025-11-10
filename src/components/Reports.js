@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { API_URL } from '../utils/config';
 
 const Reports = () => {
   const [reports, setReports] = useState([]);
@@ -9,22 +10,17 @@ const Reports = () => {
   useEffect(() => {
     const fetchReports = async () => {
       try {
-        // Step 1: Get the token from localStorage
         const token = localStorage.getItem('token');
-        if (!token) {
-          throw new Error('No token found');
-        }
+        if (!token) throw new Error('No token found');
 
-        // Step 2: Set up the headers with the token
         const config = {
           headers: {
-            'x-auth-token': token, // This header must match your backend's authMiddleware
+            'x-auth-token': token,
           },
         };
 
-        // Step 3: Make the GET request with the auth header
-        const res = await axios.get('http://localhost:5000/api/reports', config);
-        setReports(res.data);
+        const res = await axios.get(`${API_URL}/reports`, config);
+        setReports(res.data.data || []); // ✅ fixed
         setLoading(false);
       } catch (err) {
         console.error(err.response ? err.response.data : err.message);
