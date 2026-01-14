@@ -65,8 +65,9 @@
 
 .nav-branding {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   color: white;
   font-weight: 700;
   font-size: 18px;
@@ -480,6 +481,11 @@
   background: linear-gradient(135deg, rgba(72, 187, 120, 0.05) 0%, rgba(255, 255, 255, 0.95) 100%);
 }
 
+.stat-card-danger {
+  border-left-color: #ef4444;
+  background: rgba(255, 255, 255, 0.95);
+}
+
 .stat-card-info {
   border-left-color: #4299e1;
   background: linear-gradient(135deg, rgba(66, 153, 225, 0.05) 0%, rgba(255, 255, 255, 0.95) 100%);
@@ -510,6 +516,11 @@
 
 .stat-card-success .stat-icon {
   background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+  color: white;
+}
+
+.stat-card-danger .stat-icon {
+  background: #ef4444;
   color: white;
 }
 

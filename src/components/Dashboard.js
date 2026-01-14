@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import auth from '../utils/auth';
 import { useNavigate } from 'react-router-dom';
@@ -26,6 +26,7 @@ const Dashboard = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [userPage, setUserPage] = useState(1);
   const [sortBy, setSortBy] = useState('newest'); // 'newest' or 'oldest'
+  const [locationFilter, setLocationFilter] = useState(''); // '', 'Bulaon', 'Del Carmen'
   const [userSortBy, setUserSortBy] = useState(''); // '', 'reportsHigh', 'reportsLow', 'pointsHigh', 'pointsLow'
   const [selectedReport, setSelectedReport] = useState(null);
   const [showAdminManagement, setShowAdminManagement] = useState(false);
@@ -34,12 +35,16 @@ const Dashboard = () => {
   const [newAdminData, setNewAdminData] = useState({ email: '', password: '', confirmPassword: '', location: '' });
   const [userRole, setUserRole] = useState(null);
   const [adminLocation, setAdminLocation] = useState(null);
+  const [currentAdminName, setCurrentAdminName] = useState('');
   const [showLoginLogs, setShowLoginLogs] = useState(false);
   const [loginLogs, setLoginLogs] = useState([]);
   const [loginLogsLoading, setLoginLogsLoading] = useState(false);
   const [loginLogsPage, setLoginLogsPage] = useState(1);
   const [confirmModal, setConfirmModal] = useState({ show: false, title: '', message: '', onConfirm: null, confirmText: '', cancelText: 'Cancel', type: 'danger' });
   const [successAlert, setSuccessAlert] = useState({ show: false, message: '', type: 'success' });
+  const [resolutionPhoto, setResolutionPhoto] = useState(null);
+  const [resolutionPhotoPreview, setResolutionPhotoPreview] = useState(null);
+  const resolutionPhotoRef = useRef(null); // Ref to hold the latest photo
   const reportsPerPage = 10;
   const usersPerPage = 10;
   const logsPerPage = 10;
@@ -103,12 +108,47 @@ const Dashboard = () => {
         const config = { headers: { Authorization: `Bearer ${token}` } };
         console.log('Fetching data from:', API_URL);
 
+        // Fetch current admin info
+        try {
+          const currentUserRes = await axios.get(`${API_URL}/users/me`, config);
+          console.log('Current user response:', currentUserRes.data);
+          const currentUser = currentUserRes.data?.data || currentUserRes.data;
+          if (currentUser && currentUser.email) {
+            setCurrentAdminName(currentUser.email);
+            console.log('Current admin email set:', currentUser.email);
+          }
+        } catch (err) {
+          console.log('Error fetching current user:', err.message);
+        }
+
+        // Debug: Check report locations
+        try {
+          const debugRes = await axios.get(`${API_URL}/reports/debug/locations`, config);
+          console.log('🔍 Debug - Report locations:', debugRes.data);
+        } catch (debugErr) {
+          console.log('Debug endpoint error:', debugErr.message);
+        }
+
         const resReports = await axios.get(`${API_URL}/reports`, config);
         const reportData = Array.isArray(resReports.data)
           ? resReports.data
           : Array.isArray(resReports.data?.data)
             ? resReports.data.data
             : [];
+        console.log('📊 Reports received:', reportData.length);
+        console.log('📊 Admin location from token:', adminLocation);
+        console.log('📊 User role:', userRole);
+        if (reportData.length > 0) {
+          console.log('📊 Sample report data:', reportData.slice(0, 3).map(r => ({ 
+            firstName: r.firstName,
+            middleName: r.middleName,
+            lastName: r.lastName,
+            name: r.name,
+            contact: r.contact,
+            userLocation: r.userLocation,
+            location: r.location 
+          })));
+        }
         setReports(reportData);
         console.log('Reports fetched successfully:', reportData.length);
 
@@ -188,11 +228,63 @@ const Dashboard = () => {
     fetchData();
   }, []);
 
+  // Migration function to populate userLocation for existing reports
+  const runLocationMigration = async () => {
+    try {
+      const token = await auth.getToken();
+      const config = { headers: { Authorization: `Bearer ${token}` } };
+      
+      const response = await axios.post(`${API_URL}/reports/migrate/fix-locations`, {}, config);
+      
+      console.log('Migration result:', response.data);
+      alert(`Migration completed!\nUpdated: ${response.data.updated}\nFailed: ${response.data.failed}\nTotal: ${response.data.total}`);
+      
+      // Refresh data after migration
+      window.location.reload();
+    } catch (err) {
+      console.error('Migration error:', err);
+      alert('Migration failed: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
   const handleStatusChange = async (reportId, newStatus) => {
     const report = reports.find(r => r._id === reportId);
     const reporterName = report?.firstName || report?.lastName 
       ? `${report.firstName || ''} ${report.middleName || ''} ${report.lastName || ''}`.trim()
       : report?.name || 'Unknown';
+    
+    // If changing to Resolved, use the photo upload modal instead
+    if (newStatus === 'Resolved') {
+      // Reset photo states first
+      setResolutionPhoto(null);
+      setResolutionPhotoPreview(null);
+      resolutionPhotoRef.current = null;
+      
+      // Store the reportId for later use
+      const targetReportId = reportId;
+      
+      setConfirmModal({
+        show: true,
+        title: 'Mark as Resolved',
+        message: 'resolution_photo_upload',
+        confirmText: 'Mark as Resolved',
+        cancelText: 'Cancel',
+        type: 'success',
+        reportId: targetReportId,
+        onConfirm: async () => {
+          // Get the current photo from ref at confirmation time
+          const currentPhoto = resolutionPhotoRef.current;
+          console.log('🔍 Current resolution photo at confirmation:', currentPhoto);
+          
+          await markReportAsResolved(targetReportId, currentPhoto);
+          setConfirmModal({ show: false, title: '', message: '', confirmText: '', cancelText: '', type: '', onConfirm: null });
+          setResolutionPhoto(null);
+          setResolutionPhotoPreview(null);
+          resolutionPhotoRef.current = null;
+        }
+      });
+      return;
+    }
     
     setConfirmModal({
       show: true,
@@ -367,9 +459,17 @@ const Dashboard = () => {
   const endUserIndex = startUserIndex + usersPerPage;
   const paginatedUsers = filteredUsers.slice(startUserIndex, endUserIndex);
 
-  // Filter and sort reports based on search term and date
+  // Filter and sort reports based on search term, location, and date
   const getFilteredAndSortedReports = (reportsArray) => {
     let filtered = reportsArray.filter(report => {
+      // Filter by location for superadmin
+      if (locationFilter && userRole === 'superadmin') {
+        if (report.userLocation !== locationFilter) {
+          return false;
+        }
+      }
+      
+      // Filter by search term
       if (!searchTerm) return true;
       const searchLower = searchTerm.toLowerCase();
       
@@ -430,6 +530,61 @@ const Dashboard = () => {
 
   const closeReportModal = () => {
     setSelectedReport(null);
+  };
+
+  // Mark report as resolved (with optional resolution photo)
+  const markReportAsResolved = async (reportId, resolutionPhoto = null) => {
+    try {
+      const token = await auth.getToken();
+      if (!token) {
+        setSuccessAlert({ show: true, message: 'Authentication required. Please login again.', type: 'error' });
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('status', 'Resolved');
+      if (resolutionPhoto) {
+        formData.append('resolutionPhoto', resolutionPhoto);
+        console.log('📷 Uploading resolution photo:', resolutionPhoto.name, resolutionPhoto.size, 'bytes');
+      } else {
+        console.log('⚠️ No resolution photo provided');
+      }
+
+      const config = { 
+        headers: { 
+          Authorization: `Bearer ${token}`
+          // Don't set Content-Type - let axios set it automatically with boundary
+        } 
+      };
+      
+      const response = await axios.put(`${API_URL}/reports/${reportId}`, formData, config);
+
+      // Use the updated report from the server response
+      const updatedReport = response.data;
+      console.log('✅ Report marked as resolved:', updatedReport);
+
+      // Update the report in the local state with the server response
+      setReports(prevReports => 
+        prevReports.map(report => 
+          report._id === reportId ? updatedReport : report
+        )
+      );
+
+      // Update selected report if it's the same one
+      if (selectedReport && selectedReport._id === reportId) {
+        setSelectedReport(updatedReport);
+      }
+
+      setSuccessAlert({ 
+        show: true, 
+        message: 'Report marked as resolved! Email sent to user for confirmation.', 
+        type: 'success' 
+      });
+    } catch (error) {
+      console.error('Error marking report as resolved:', error);
+      const errorMessage = error.response?.data?.error || error.response?.data?.message || 'Failed to mark report as resolved';
+      setSuccessAlert({ show: true, message: errorMessage, type: 'error' });
+    }
   };
 
   // Admin Management Functions
@@ -755,8 +910,22 @@ const Dashboard = () => {
         <div className="nav-header">
           {!isDrawerCollapsed && (
             <div className="nav-branding">
-              <span className="nav-logo">🌿</span>
-              <span>EcoCheck</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span className="nav-logo">🌿</span>
+                <span>EcoCheck</span>
+              </div>
+              {currentAdminName && (
+                <div style={{
+                  fontSize: '12px',
+                  marginTop: '4px',
+                  opacity: 0.8,
+                  fontWeight: '400',
+                  color: '#d0d0d0',
+                  wordBreak: 'break-word'
+                }}>
+                  {currentAdminName}
+                </div>
+              )}
             </div>
           )}
           <button 
@@ -877,12 +1046,12 @@ const Dashboard = () => {
                    'DASHBOARD'}
                 </span>
                 <div className="header-subtitle">
-                  {showUsers ? 'View and manage registered user accounts' : 
-                   showArchive ? 'View resolved and archived reports' : 
-                   showActiveReports ? 'View all pending and ongoing reports' :
+                  {showUsers ? `View and manage registered user accounts` : 
+                   showArchive ? `View resolved and archived reports` : 
+                   showActiveReports ? `View all pending and ongoing reports` :
                    showAdminManagement ? 'Manage administrator accounts' : 
                    showLoginLogs ? 'View login and logout history' : 
-                   'Overview and analytics'}
+                   `Overview and analytics`}
                 </div>
               </div>
             </div>
@@ -904,15 +1073,34 @@ const Dashboard = () => {
                   </select>
                 )}
                 {(showActiveReports || showArchive) && !showUsers && !showAdminManagement && !showLoginLogs && (
-                  <select
-                    className="sort-select"
-                    value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value)}
-                    style={{ marginRight: '12px' }}
-                  >
-                    <option value="newest">Newest First</option>
-                    <option value="oldest">Oldest First</option>
-                  </select>
+                  <>
+                    {/* Location Filter - Superadmin Only */}
+                    {(userRole === 'superadmin' || userRole === 'super_admin' || userRole === 'SUPERADMIN') && (
+                      <select
+                        className="sort-select"
+                        value={locationFilter}
+                        onChange={(e) => {
+                          setLocationFilter(e.target.value);
+                          setCurrentPage(1); // Reset to first page when filtering
+                        }}
+                        style={{ marginRight: '12px' }}
+                      >
+                        <option value="">All Locations</option>
+                        <option value="Bulaon">Bulaon</option>
+                        <option value="Del Carmen">Del Carmen</option>
+                      </select>
+                    )}
+                    {/* Sort Dropdown */}
+                    <select
+                      className="sort-select"
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      style={{ marginRight: '12px' }}
+                    >
+                      <option value="newest">Newest First</option>
+                      <option value="oldest">Oldest First</option>
+                    </select>
+                  </>
                 )}
                 <div style={{ position: 'relative' }}>
                   <input
@@ -981,6 +1169,71 @@ const Dashboard = () => {
                       <div className="stat-value">{users.length}</div>
                       <div className="stat-change">
                         Registered accounts
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* High Report Area Card */}
+                  <div className="stat-card stat-card-danger">
+                    <div className="stat-icon">⚠️</div>
+                    <div className="stat-details">
+                      <div className="stat-label">High Report Area</div>
+                      <div className="stat-value" style={{ fontSize: '20px', lineHeight: '1.3' }}>
+                        {(() => {
+                          if (reports.length === 0) return 'No data';
+                          const locationCounts = {};
+                          reports.forEach(r => {
+                            const loc = r.location;
+                            if (loc && loc.trim() !== '') {
+                              // Extract city/municipality from address
+                              let cleanLocation = loc;
+                              if (loc.includes(',')) {
+                                // Try to find "Del Carmen" or "Bulaon" or other city names
+                                const parts = loc.split(',').map(p => p.trim());
+                                const cityPart = parts.find(p => 
+                                  p.toLowerCase().includes('del carmen') || 
+                                  p.toLowerCase().includes('bulaon') ||
+                                  p.toLowerCase().includes('san fernando')
+                                );
+                                cleanLocation = cityPart || parts[parts.length - 2] || parts[0];
+                              }
+                              locationCounts[cleanLocation] = (locationCounts[cleanLocation] || 0) + 1;
+                            }
+                          });
+                          console.log('🗺️ Location counts:', locationCounts);
+                          if (Object.keys(locationCounts).length === 0) return 'No data';
+                          const topLocation = Object.entries(locationCounts)
+                            .sort((a, b) => b[1] - a[1])[0];
+                          console.log('🎯 Top location:', topLocation);
+                          return topLocation ? topLocation[0] : 'No data';
+                        })()}
+                      </div>
+                      <div className="stat-change">
+                        {(() => {
+                          if (reports.length === 0) return '0 reports';
+                          const locationCounts = {};
+                          reports.forEach(r => {
+                            const loc = r.location;
+                            if (loc && loc.trim() !== '') {
+                              // Extract city/municipality from address
+                              let cleanLocation = loc;
+                              if (loc.includes(',')) {
+                                const parts = loc.split(',').map(p => p.trim());
+                                const cityPart = parts.find(p => 
+                                  p.toLowerCase().includes('del carmen') || 
+                                  p.toLowerCase().includes('bulaon') ||
+                                  p.toLowerCase().includes('san fernando')
+                                );
+                                cleanLocation = cityPart || parts[parts.length - 2] || parts[0];
+                              }
+                              locationCounts[cleanLocation] = (locationCounts[cleanLocation] || 0) + 1;
+                            }
+                          });
+                          if (Object.keys(locationCounts).length === 0) return '0 reports';
+                          const topLocation = Object.entries(locationCounts)
+                            .sort((a, b) => b[1] - a[1])[0];
+                          return topLocation ? `${topLocation[1]} reports` : '0 reports';
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -1491,12 +1744,11 @@ const Dashboard = () => {
                                   {/* Display individual name fields if available, fallback to name */}
                                   {report.firstName || report.lastName ? (
                                     `${report.firstName || ''} ${report.middleName || ''} ${report.lastName || ''}`.trim()
-                                  ) : (
-                                    report.name || 'Unknown'
-                                  )}
+                                  ) : report.name || ''}
                                 </h5>
                                 <span className={`status-chip ${
                                   report.status === 'Resolved' ? 'success' : 
+                                  report.status === 'Pending Confirmation' ? 'info' :
                                   report.status === 'On Going' ? 'warning' : 
                                   'danger'
                                 }`}>
@@ -1504,10 +1756,52 @@ const Dashboard = () => {
                                 </span>
                               </div>
                               
-                              {/* Always show description */}
+                              {/* Show name on card */}
                               <p className="card-text dashboard-card-text">
-                                <strong>Description:</strong> {report.description || 'N/A'}
+                                <strong>Name:</strong> {
+                                  report.firstName || report.lastName ? (
+                                    `${report.firstName || ''} ${report.middleName || ''} ${report.lastName || ''}`.trim()
+                                  ) : report.name ? report.name
+                                  : report.user?.firstName || report.user?.lastName ? (
+                                    `${report.user.firstName || ''} ${report.user.middleInitial ? report.user.middleInitial + '.' : ''} ${report.user.lastName || ''}`.trim()
+                                  ) : 'N/A'
+                                }
                               </p>
+                              
+                              {/* Show contact number on card - hide for resolved reports */}
+                              {report.status !== 'Resolved' && (
+                                <p className="card-text dashboard-card-text">
+                                  <strong>Contact Number:</strong> {
+                                    report.contact 
+                                      ? (report.contact.startsWith('+63') 
+                                          ? report.contact.replace('+63', '+63 ') 
+                                          : report.contact)
+                                      : report.user?.contactNumber
+                                        ? (report.user.contactNumber.startsWith('0')
+                                            ? '+63 ' + report.user.contactNumber.substring(1)
+                                            : report.user.contactNumber)
+                                        : 'N/A'
+                                  }
+                                </p>
+                              )}
+                              
+                              {/* Show location on card */}
+                              <p className="card-text dashboard-card-text">
+                                <strong>Location:</strong> {report.location || 'N/A'}
+                              </p>
+                              
+                              {/* Show privacy notice for resolved reports */}
+                              {report.status === 'Resolved' && !report.contact && !report.description && (
+                                <p className="card-text" style={{
+                                  fontSize: '12px',
+                                  color: '#666',
+                                  fontStyle: 'italic',
+                                  marginTop: '4px'
+                                }}>
+                                  <i className="fas fa-shield-alt" style={{ marginRight: '4px' }}></i>
+                                  Personal info removed
+                                </p>
+                              )}
                               
                               {/* Read more button */}
                               <button 
@@ -1797,13 +2091,11 @@ const Dashboard = () => {
             }}>
               <div className="modal-header">
                 <h5 className="modal-title" style={{ color: 'white' }}>
-                  Report Details - {
+                  Report Details {selectedReport.status === 'Resolved' ? '(Archived)' : ''}{selectedReport.firstName || selectedReport.lastName || selectedReport.name ? ` - ${
                     selectedReport.firstName || selectedReport.lastName ? (
                       `${selectedReport.firstName || ''} ${selectedReport.middleName || ''} ${selectedReport.lastName || ''}`.trim()
-                    ) : (
-                      selectedReport.name || 'Unknown'
-                    )
-                  }
+                    ) : selectedReport.name
+                  }` : ''}
                 </h5>
                 <button
                   type="button"
@@ -1849,9 +2141,48 @@ const Dashboard = () => {
 
                 {/* Report Details */}
                 <div className="report-modal-details">
+                  {selectedReport.status === 'Resolved' && (
+                    <div className="alert alert-info mb-3" style={{
+                      background: '#e3f2fd',
+                      border: '1px solid #90caf9',
+                      borderRadius: '8px',
+                      padding: '12px 16px',
+                      fontSize: '14px',
+                      color: '#0d47a1',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <i className="fas fa-shield-alt"></i>
+                      <span>Personal information has been removed for privacy protection.</span>
+                    </div>
+                  )}
                   <div className="row g-3">
                     <div className="col-md-6">
-                      <p><strong>Contact:</strong> {selectedReport.contact || 'N/A'}</p>
+                      {/* Show name */}
+                      <p><strong>Name:</strong> {
+                        selectedReport.firstName || selectedReport.lastName ? (
+                          `${selectedReport.firstName || ''} ${selectedReport.middleName || ''} ${selectedReport.lastName || ''}`.trim()
+                        ) : selectedReport.name ? selectedReport.name
+                        : selectedReport.user?.firstName || selectedReport.user?.lastName ? (
+                          `${selectedReport.user.firstName || ''} ${selectedReport.user.middleInitial ? selectedReport.user.middleInitial + '.' : ''} ${selectedReport.user.lastName || ''}`.trim()
+                        ) : 'N/A'
+                      }</p>
+                      
+                      {/* Only show contact if not resolved or if contact exists */}
+                      {selectedReport.status !== 'Resolved' && (
+                        <p><strong>Contact:</strong> {
+                          selectedReport.contact 
+                            ? (selectedReport.contact.startsWith('+63') 
+                                ? selectedReport.contact.replace('+63', '+63 ') 
+                                : selectedReport.contact)
+                            : selectedReport.user?.contactNumber
+                              ? (selectedReport.user.contactNumber.startsWith('0')
+                                  ? '+63 ' + selectedReport.user.contactNumber.substring(1)
+                                  : selectedReport.user.contactNumber)
+                              : 'N/A'
+                        }</p>
+                      )}
                       <p><strong>Location:</strong> {selectedReport.location || 'N/A'}</p>
                       {selectedReport.landmark && (
                         <p><strong>Landmark:</strong> {selectedReport.landmark}</p>
@@ -1861,6 +2192,7 @@ const Dashboard = () => {
                       <p><strong>Status:</strong> 
                         <span className={`status-chip ${
                           selectedReport.status === 'Resolved' ? 'success' : 
+                          selectedReport.status === 'Pending Confirmation' ? 'info' :
                           selectedReport.status === 'On Going' ? 'warning' : 
                           'danger'
                         } ms-2`}>
@@ -1871,15 +2203,67 @@ const Dashboard = () => {
                     </div>
                   </div>
                   
-                  <div className="mt-3">
-                    <p><strong>Description:</strong></p>
-                    <div className="description-text">
-                      {selectedReport.description || 'No description provided'}
+                  {/* Only show description if not resolved or if description exists */}
+                  {selectedReport.status !== 'Resolved' && selectedReport.description && (
+                    <div className="mt-3">
+                      <p><strong>Description:</strong></p>
+                      <div className="description-text">
+                        {selectedReport.description}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
-              <div className="modal-footer">
+              <div className="modal-footer" style={{ 
+                padding: '20px 30px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                borderTop: '1px solid #e0e0e0'
+              }}>
+                <div>
+                  {selectedReport.status !== 'Resolved' && selectedReport.status !== 'Pending Confirmation' && (userRole === 'admin' || userRole === 'superadmin') && (
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      onClick={() => {
+                        // Reset photo states
+                        setResolutionPhoto(null);
+                        setResolutionPhotoPreview(null);
+                        
+                        setConfirmModal({
+                          show: true,
+                          title: 'Mark as Pending Confirmation',
+                          message: 'resolution_photo_upload',
+                          confirmText: 'Send for Confirmation',
+                          cancelText: 'Cancel',
+                          type: 'success',
+                          reportId: selectedReport._id,
+                          onConfirm: async () => {
+                            await markReportAsResolved(selectedReport._id, resolutionPhoto);
+                            setConfirmModal({ show: false, title: '', message: '', confirmText: '', cancelText: '', type: '', onConfirm: null });
+                            setResolutionPhoto(null);
+                            setResolutionPhotoPreview(null);
+                          }
+                        });
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        fontWeight: '600'
+                      }}
+                    >
+                      <i className="fas fa-check-circle"></i>
+                      Mark as Resolved
+                    </button>
+                  )}
+                  {selectedReport.status === 'Resolved' && (
+                    <span className="text-success" style={{ fontWeight: '600', fontSize: '14px' }}>
+                      <i className="fas fa-check-circle"></i> This report has been resolved
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   className="btn btn-secondary"
@@ -1991,12 +2375,60 @@ const Dashboard = () => {
                 lineHeight: '1.6',
                 minHeight: '80px',
                 display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                textAlign: 'center',
-                fontWeight: '600'
+                flexDirection: 'column',
+                gap: '20px'
               }}>
-                {confirmModal.message}
+                {confirmModal.message === 'resolution_photo_upload' ? (
+                  <>
+                    <p style={{ margin: 0, textAlign: 'center', fontWeight: '600' }}>
+                      Upload a photo showing the resolution (optional but recommended):
+                    </p>
+                    <div style={{ width: '100%' }}>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files[0];
+                          if (file) {
+                            setResolutionPhoto(file);
+                            setResolutionPhotoPreview(URL.createObjectURL(file));
+                            resolutionPhotoRef.current = file; // Store in ref too
+                            console.log('📸 Photo selected:', file.name, file.size, 'bytes');
+                          }
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '12px',
+                          border: '2px dashed #28a745',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          fontSize: '14px'
+                        }}
+                      />
+                      {resolutionPhotoPreview && (
+                        <div style={{ marginTop: '15px', textAlign: 'center' }}>
+                          <img 
+                            src={resolutionPhotoPreview} 
+                            alt="Preview" 
+                            style={{ 
+                              maxWidth: '100%', 
+                              maxHeight: '200px', 
+                              borderRadius: '8px',
+                              boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                            }} 
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <p style={{ margin: 0, fontSize: '14px', color: '#666', textAlign: 'center' }}>
+                      This will mark the report as "Pending Confirmation". The user will receive an email and must confirm in the mobile app. Points will be awarded upon user confirmation.
+                    </p>
+                  </>
+                ) : (
+                  <div style={{ textAlign: 'center', fontWeight: '600' }}>
+                    {confirmModal.message}
+                  </div>
+                )}
               </div>
               <div className="modal-footer" style={{
                 background: '#f8f9fa',
